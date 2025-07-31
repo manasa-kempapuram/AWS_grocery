@@ -1,12 +1,30 @@
-.idea/aws.xml
-frontend/frontend-build.zip
-frontend/temp_extract/
-frontend/src/config.js~
-venv/
-cat <<EOF > .gitignore
+# Terraform files
 *.tfstate
 *.tfstate.*
 .terraform/
 .terraform.lock.hcl
+
+# AWS keys
 *.pem
-EOF
+
+# Python virtual environments
+venv/
+.venv/
+
+# IntelliJ/IDEA config
+.idea/
+
+# Frontend build artifacts and temp files
+frontend/frontend-build.zip
+frontend/temp_extract/
+frontend/src/config.js~
+
+# Sensitive configuration
+terraform.tfvars
+
+.terraform/
+*.tfstate
+*.tfstate.backup
+.crash/
+*.log
+*.tfvars
