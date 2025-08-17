@@ -1,12 +1,33 @@
+
+##################
 # Provider Configuration
+##################
 provider "aws" {
   region = "eu-north-1"
 }
 
 ##################
+# Random ID for S3 bucket suffix
+##################
+resource "random_id" "bucket_suffix" {
+  byte_length = 4
+}
+
+##################
+# S3 Bucket for Avatars
+##################
+resource "aws_s3_bucket" "avatars" {
+  bucket = "grocerymate-avatars-${random_id.bucket_suffix.hex}"
+
+  tags = {
+    Name        = "grocerymate-avatars"
+    Environment = "Dev"
+  }
+}
+
+##################
 # Networking
 ##################
-
 resource "aws_vpc" "grocery_vpc" {
   cidr_block = "10.0.0.0/16"
 }
@@ -53,7 +74,6 @@ resource "aws_security_group" "grocery_sg" {
 ##################
 # Load Balancer & Target Group
 ##################
-
 resource "aws_lb" "grocery_alb_v2" {
   name               = "grocery-alb-v2"
   internal           = false
@@ -90,40 +110,10 @@ resource "aws_lb_listener" "grocery_listener" {
 }
 
 ##################
-# Auto Scaling Group
+# IAM Roles for EC2 + CloudWatch + S3
 ##################
-
-resource "aws_autoscaling_group" "grocery_asg_v2" {
-  name                = "grocery-asg-v2"
-  max_size            = 4
-  min_size            = 2
-  desired_capacity     = 2
-  vpc_zone_identifier = [aws_subnet.grocery_subnet_1.id, aws_subnet.grocery_subnet_2.id]
-
-  launch_template {
-    id      = aws_launch_template.grocery_lt.id
-    version = "$Latest"
-  }
-
-  target_group_arns         = [aws_lb_target_group.grocery_tg_v3.arn]
-  health_check_type         = "ELB"
-  health_check_grace_period = 300
-
-  tag {
-    key                 = "Name"
-    value               = "GroceryASGInstance"
-    propagate_at_launch = true
-  }
-}
-
-
-
-##################
-# IAM Roles for CloudWatch
-##################
-
-resource "aws_iam_role" "ec2_cloudwatch_role" {
-  name = "ec2-cloudwatch-role"
+resource "aws_iam_role" "ec2_role" {
+  name = "ec2-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17",
@@ -136,37 +126,40 @@ resource "aws_iam_role" "ec2_cloudwatch_role" {
 }
 
 resource "aws_iam_role_policy_attachment" "ec2_cloudwatch_attach" {
-  role       = aws_iam_role.ec2_cloudwatch_role.name
+  role       = aws_iam_role.ec2_role.name
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
 }
 
-resource "aws_iam_instance_profile" "ec2_cloudwatch_profile" {
-  name = "ec2-cloudwatch-instance-profile"
-  role = aws_iam_role.ec2_cloudwatch_role.name
-}
+resource "aws_iam_role_policy" "ec2_s3_access" {
+  name = "ec2-s3-access"
+  role = aws_iam_role.ec2_role.id
 
-resource "aws_iam_role" "rds_monitoring" {
-  name = "rds-monitoring-role"
-
-  assume_role_policy = jsonencode({
+  policy = jsonencode({
     Version = "2012-10-17",
-    Statement = [{
-      Effect    = "Allow",
-      Principal = { Service = "monitoring.rds.amazonaws.com" },
-      Action    = "sts:AssumeRole"
-    }]
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ],
+        Resource = [
+          aws_s3_bucket.avatars.arn,
+          "${aws_s3_bucket.avatars.arn}/*"
+        ]
+      }
+    ]
   })
 }
 
-resource "aws_iam_role_policy_attachment" "rds_monitoring_attach" {
-  role       = aws_iam_role.rds_monitoring.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"
+resource "aws_iam_instance_profile" "ec2_profile" {
+  name = "ec2-instance-profile"
+  role = aws_iam_role.ec2_role.name
 }
 
 ##################
-# Launch Template for ASG with CloudWatch Agent
+# Launch Template for ASG
 ##################
-
 resource "aws_launch_template" "grocery_lt" {
   name_prefix   = "grocery-lt-"
   image_id      = "ami-00c8ac9147e19828e"
@@ -174,7 +167,7 @@ resource "aws_launch_template" "grocery_lt" {
   key_name      = var.key_pair_name
 
   iam_instance_profile {
-    name = aws_iam_instance_profile.ec2_cloudwatch_profile.name
+    name = aws_iam_instance_profile.ec2_profile.name
   }
 
   user_data = base64encode(<<-EOF
@@ -194,11 +187,35 @@ resource "aws_launch_template" "grocery_lt" {
   }
 }
 
+##################
+# Auto Scaling Group
+##################
+resource "aws_autoscaling_group" "grocery_asg_v2" {
+  name                = "grocery-asg-v2"
+  max_size            = 4
+  min_size            = 2
+  desired_capacity    = 2
+  vpc_zone_identifier = [aws_subnet.grocery_subnet_1.id, aws_subnet.grocery_subnet_2.id]
+
+  launch_template {
+    id      = aws_launch_template.grocery_lt.id
+    version = "$Latest"
+  }
+
+  target_group_arns         = [aws_lb_target_group.grocery_tg_v3.arn]
+  health_check_type         = "ELB"
+  health_check_grace_period = 300
+
+  tag {
+    key                 = "Name"
+    value               = "GroceryASGInstance"
+    propagate_at_launch = true
+  }
+}
 
 ##################
-# RDS Multi-AZ Setup with Enhanced Monitoring
+# RDS Multi-AZ Setup
 ##################
-
 resource "aws_db_subnet_group" "grocery_db_subnet_group_v2" {
   name       = "grocery-db-subnet-group_v2"
   subnet_ids = [aws_subnet.grocery_subnet_1.id, aws_subnet.grocery_subnet_2.id]
@@ -209,7 +226,6 @@ resource "aws_db_instance" "grocery_rds" {
   engine                 = "mysql"
   engine_version         = "8.0"
   instance_class         = "db.t3.micro"
- 
   username               = var.db_username
   password               = var.db_password
   multi_az               = true
@@ -223,9 +239,29 @@ resource "aws_db_instance" "grocery_rds" {
 }
 
 ##################
-# Internet Gateway and Route Tables
+# IAM Role for RDS Monitoring
 ##################
+resource "aws_iam_role" "rds_monitoring" {
+  name = "rds-monitoring-role"
 
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect    = "Allow",
+      Principal = { Service = "monitoring.rds.amazonaws.com" },
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "rds_monitoring_attach" {
+  role       = aws_iam_role.rds_monitoring.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"
+}
+
+##################
+# Internet Gateway & Routes
+##################
 resource "aws_internet_gateway" "grocery_igw" {
   vpc_id = aws_vpc.grocery_vpc.id
 }
@@ -250,9 +286,8 @@ resource "aws_route_table_association" "grocery_subnet_2_assoc" {
 }
 
 ##################
-# CloudWatch Alarm for High CPU on ASG Instances
+# CloudWatch Alarm
 ##################
-
 resource "aws_cloudwatch_metric_alarm" "high_cpu_alarm" {
   alarm_name          = "HighCPUAlarm"
   comparison_operator = "GreaterThanThreshold"
@@ -268,4 +303,4 @@ resource "aws_cloudwatch_metric_alarm" "high_cpu_alarm" {
     AutoScalingGroupName = aws_autoscaling_group.grocery_asg_v2.name
   }
 }
->>>>>>> 8b89a54 (cloudwatch added)
+
